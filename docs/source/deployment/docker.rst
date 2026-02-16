@@ -102,6 +102,67 @@ The following shows how to launch the container in a detached state and enter it
     # We pass 'base' explicitly, but if we hadn't it would default to 'base'
     ./docker/container.py enter base
 
+헤드리스 서버 빠른 시작 (한국어)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+아래 절차는 GUI/X11 없이 헤드리스 서버에서 바로 실행하는 기준입니다.
+
+.. code:: bash
+
+    # 0) (선택) 기본 설정 파일 준비
+    # container.py가 자동으로 docker/.container.cfg를 생성하며,
+    # 기본값은 X11_FORWARDING_ENABLED=0 입니다.
+    cp docker/.container.cfg.example docker/.container.cfg
+
+    # 1) 컨테이너 시작/진입/중지
+    python3 docker/container.py start
+    python3 docker/container.py enter base
+    python3 docker/container.py stop base
+
+    # 2) (컨테이너 내부) Go2W 에셋 다운로드
+    ./isaaclab.sh -p scripts/assets/download_unitree_go2w.py
+
+    # 3) (컨테이너 내부) 환경 등록 확인
+    ./isaaclab.sh -p scripts/environments/list_envs.py --keyword go2w
+
+    # 4) (컨테이너 내부) 학습
+    ./isaaclab.sh -p scripts/rsl_rl/train.py --task Isaac-Velocity-Flat-Unitree-Go2W-v0 --headless
+
+    # 5) (컨테이너 내부) 플레이/평가
+    # headless 터미널 키보드 모드(WSAD + QE):
+    ./isaaclab.sh -p scripts/rsl_rl/play.py --task Isaac-Velocity-Flat-Unitree-Go2W-Play-v0 --headless --command_source keyboard
+    # 완전 비대화 서버에서는 스케줄 모드:
+    ./isaaclab.sh -p scripts/rsl_rl/play.py --task Isaac-Velocity-Flat-Unitree-Go2W-Play-v0 --headless --command_source schedule
+
+Go2W 파일 위치/오버라이드
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* 기본 다운로드 경로: ``source/isaaclab_assets/isaaclab_assets/data/external/unitree_model/Go2W``
+* 필수 검증 파일:
+
+  * ``source/isaaclab_assets/isaaclab_assets/data/external/unitree_model/Go2W/usd/go2w.usd``
+  * ``source/isaaclab_assets/isaaclab_assets/data/external/unitree_model/Go2W/usd/configuration/go2w_description_base.usd``
+  * ``source/isaaclab_assets/isaaclab_assets/data/external/unitree_model/Go2W/usd/configuration/go2w_description_physics.usd``
+  * ``source/isaaclab_assets/isaaclab_assets/data/external/unitree_model/Go2W/usd/configuration/go2w_description_sensor.usd``
+
+* 경로 오버라이드:
+
+  * ``ISAACLAB_GO2W_ASSET_DIR``: Go2W 폴더 경로 지정 (다운로더)
+  * ``ISAACLAB_UNITREE_MODEL_ROOT``: unitree_model 루트 경로 지정 (다운로더)
+  * ``ISAACLAB_GO2W_USD_PATH``: Go2W USD 파일 경로 지정 (task/robot config)
+
+Docker pull 인증 오류 (nvcr.io unauthorized)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+`python3 docker/container.py start` 중에 ``nvcr.io`` 접근이 ``unauthorized`` 로 실패하면,
+NGC API Key로 먼저 로그인해야 합니다.
+
+.. code:: bash
+
+    # Username은 반드시 아래 문자열 그대로 사용
+    export NGC_API_KEY=<YOUR_NGC_API_KEY>
+    echo "${NGC_API_KEY}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+
 To copy files from the base container to the host machine, you can use the following command:
 
 .. code:: bash
@@ -141,9 +202,10 @@ X11 forwarding
 The container supports X11 forwarding, which allows the user to run GUI applications from the container
 and display them on the host machine.
 
-The first time a container is started with ``./docker/container.py start``, the script prompts
-the user whether to activate X11 forwarding. This will create a file at ``docker/.container.cfg``
-to store the user's choice for future runs.
+The ``docker/.container.cfg`` state file controls whether X11 forwarding is enabled.
+Isaac Lab ships ``docker/.container.cfg.example`` with ``X11_FORWARDING_ENABLED=0`` and
+``container.py`` auto-creates ``docker/.container.cfg`` from this template when missing.
+This keeps headless/server usage non-interactive by default.
 
 If you want to change the choice, you can set the parameter ``X11_FORWARDING_ENABLED`` to '0' or '1'
 in the ``docker/.container.cfg`` file to disable or enable X11 forwarding, respectively. After that, you need to

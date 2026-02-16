@@ -1,0 +1,8 @@
+# Isaac Lab Docker container defaults.
+#
+# X11 forwarding is disabled by default so headless servers can run
+# `python3 docker/container.py start` without interactive prompts.
+#
+# Set to 1 only when host-side X11 forwarding is configured.
+[X11]
+X11_FORWARDING_ENABLED=0

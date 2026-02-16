@@ -12,6 +12,28 @@ from pathlib import Path
 from utils import ContainerInterface, x11_utils
 
 
+DEFAULT_CONTAINER_CFG = """# Isaac Lab Docker container defaults.
+# Set to 1 only when host X11 forwarding is available.
+[X11]
+X11_FORWARDING_ENABLED=0
+"""
+
+
+def ensure_container_cfg(context_dir: Path) -> None:
+    """Create ``.container.cfg`` with headless-safe defaults when it does not exist."""
+    cfg_path = context_dir / ".container.cfg"
+    if cfg_path.exists():
+        return
+
+    cfg_example_path = context_dir / ".container.cfg.example"
+    if cfg_example_path.exists():
+        cfg_path.write_text(cfg_example_path.read_text(encoding="utf-8"), encoding="utf-8")
+        print(f"[INFO] Created '{cfg_path.name}' from '{cfg_example_path.name}' (X11 forwarding disabled by default).")
+    else:
+        cfg_path.write_text(DEFAULT_CONTAINER_CFG, encoding="utf-8")
+        print(f"[INFO] Created '{cfg_path.name}' with X11 forwarding disabled by default.")
+
+
 def parse_cli_args() -> argparse.Namespace:
     """Parse command line arguments.
 
@@ -108,6 +130,9 @@ def main(args: argparse.Namespace):
             "Docker is not installed! Please check the 'Docker Guide' for instruction: "
             "https://isaac-sim.github.io/IsaacLab/source/deployment/docker.html"
         )
+
+    # make sure the runtime container config exists so headless servers stay non-interactive
+    ensure_container_cfg(context_dir=Path(__file__).resolve().parent)
 
     # creating container interface
     ci = ContainerInterface(

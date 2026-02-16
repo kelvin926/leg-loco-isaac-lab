@@ -34,6 +34,53 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--command_source",
+    type=str,
+    default="random",
+    choices=["random", "schedule", "keyboard"],
+    help=(
+        "How to drive velocity commands during play. "
+        "'random': environment command sampling, 'schedule': deterministic command schedule, "
+        "'keyboard': terminal WSAD+QE command updates."
+    ),
+)
+parser.add_argument(
+    "--command_term",
+    type=str,
+    default="base_velocity",
+    help="Command term name to overwrite when using --command_source schedule|keyboard.",
+)
+parser.add_argument(
+    "--command_vx_limit",
+    type=float,
+    default=1.5,
+    help="Absolute limit for commanded vx in schedule/keyboard modes.",
+)
+parser.add_argument(
+    "--command_vy_limit",
+    type=float,
+    default=1.0,
+    help="Absolute limit for commanded vy in schedule/keyboard modes.",
+)
+parser.add_argument(
+    "--command_wz_limit",
+    type=float,
+    default=1.5,
+    help="Absolute limit for commanded wz in schedule/keyboard modes.",
+)
+parser.add_argument(
+    "--command_lin_step",
+    type=float,
+    default=0.2,
+    help="Per-key increment for vx and vy in keyboard mode.",
+)
+parser.add_argument(
+    "--command_yaw_step",
+    type=float,
+    default=0.2,
+    help="Per-key increment for wz in keyboard mode.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -53,8 +100,17 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import atexit
 import os
+import select
 import time
+import tty
+from dataclasses import dataclass
+
+try:
+    import termios
+except ImportError:
+    termios = None
 
 import gymnasium as gym
 import torch
@@ -78,6 +134,119 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 # PLACEHOLDER: Extension template (do not remove this comment)
+
+
+@dataclass
+class _CommandLimits:
+    vx: float
+    vy: float
+    wz: float
+
+
+class _TerminalWsadCommandSource:
+    """Terminal WSAD+QE command source for headless play."""
+
+    def __init__(self, limits: _CommandLimits, lin_step: float, yaw_step: float):
+        self._limits = limits
+        self._lin_step = lin_step
+        self._yaw_step = yaw_step
+        self._command = torch.zeros(3, dtype=torch.float32)
+        self._enabled = False
+        self._fd: int | None = None
+        self._original_termios = None
+
+        if termios is None or not sys.stdin.isatty():
+            return
+
+        self._fd = sys.stdin.fileno()
+        self._original_termios = termios.tcgetattr(self._fd)
+        tty.setcbreak(self._fd)
+        atexit.register(self.close)
+        self._enabled = True
+        self._print_help()
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def _print_help(self):
+        print("[INFO] Keyboard command mode enabled (terminal):")
+        print("       W/S: +vx/-vx, A/D: +vy/-vy, Q/E: +wz/-wz")
+        print("       Space: reset command to zero, H: print help")
+
+    def poll(self) -> torch.Tensor:
+        if not self._enabled:
+            return self._command
+
+        ready, _, _ = select.select([sys.stdin], [], [], 0.0)
+        while ready:
+            key = sys.stdin.read(1).lower()
+            if key == "w":
+                self._command[0] += self._lin_step
+            elif key == "s":
+                self._command[0] -= self._lin_step
+            elif key == "a":
+                self._command[1] += self._lin_step
+            elif key == "d":
+                self._command[1] -= self._lin_step
+            elif key == "q":
+                self._command[2] += self._yaw_step
+            elif key == "e":
+                self._command[2] -= self._yaw_step
+            elif key == " ":
+                self._command.zero_()
+            elif key == "h":
+                self._print_help()
+            ready, _, _ = select.select([sys.stdin], [], [], 0.0)
+
+        self._command[0].clamp_(-self._limits.vx, self._limits.vx)
+        self._command[1].clamp_(-self._limits.vy, self._limits.vy)
+        self._command[2].clamp_(-self._limits.wz, self._limits.wz)
+        return self._command
+
+    def close(self):
+        if self._enabled and self._fd is not None and self._original_termios is not None and termios is not None:
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._original_termios)
+        self._enabled = False
+
+
+def _scheduled_command(step: int, limits: _CommandLimits, device: str) -> torch.Tensor:
+    # Eight short phases to exercise vx, vy and wz tracking.
+    phase = (step // 250) % 8
+    if phase == 0:
+        cmd = (0.8 * limits.vx, 0.0, 0.0)
+    elif phase == 1:
+        cmd = (-0.8 * limits.vx, 0.0, 0.0)
+    elif phase == 2:
+        cmd = (0.0, 0.8 * limits.vy, 0.0)
+    elif phase == 3:
+        cmd = (0.0, -0.8 * limits.vy, 0.0)
+    elif phase == 4:
+        cmd = (0.0, 0.0, 0.8 * limits.wz)
+    elif phase == 5:
+        cmd = (0.0, 0.0, -0.8 * limits.wz)
+    elif phase == 6:
+        cmd = (0.6 * limits.vx, 0.4 * limits.vy, 0.5 * limits.wz)
+    else:
+        cmd = (0.0, 0.0, 0.0)
+    return torch.tensor(cmd, dtype=torch.float32, device=device)
+
+
+def _apply_velocity_command_override(command_term, command: torch.Tensor):
+    term_command = command_term.command
+    if term_command.shape[1] < 3:
+        raise ValueError(f"Command term must have at least 3 dimensions, got shape={tuple(term_command.shape)}")
+
+    term_command[:, 0] = command[0]
+    term_command[:, 1] = command[1]
+    term_command[:, 2] = command[2]
+
+    if hasattr(command_term, "is_standing_env"):
+        command_term.is_standing_env[:] = False
+    if hasattr(command_term, "is_heading_env"):
+        command_term.is_heading_env[:] = False
+    if hasattr(command_term, "time_left"):
+        command_term.time_left[:] = 1.0e9
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -134,6 +303,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
 
+    # Optional external command control for command-conditioned locomotion tasks.
+    command_source = args_cli.command_source
+    command_limits = _CommandLimits(
+        vx=args_cli.command_vx_limit,
+        vy=args_cli.command_vy_limit,
+        wz=args_cli.command_wz_limit,
+    )
+    command_term = None
+    keyboard_source = None
+    if command_source != "random":
+        if not hasattr(env.unwrapped, "command_manager"):
+            raise ValueError("Selected command override mode, but environment does not have a command manager.")
+        command_term = env.unwrapped.command_manager.get_term(args_cli.command_term)
+        if command_source == "keyboard":
+            keyboard_source = _TerminalWsadCommandSource(
+                limits=command_limits,
+                lin_step=args_cli.command_lin_step,
+                yaw_step=args_cli.command_yaw_step,
+            )
+            if not keyboard_source.enabled:
+                print("[INFO] Keyboard mode requested but terminal raw input is unavailable. Falling back to schedule.")
+                command_source = "schedule"
+
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
@@ -173,6 +365,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
 
     dt = env.unwrapped.step_dt
+    step_count = 0
 
     # reset environment
     obs = env.get_observations()
@@ -182,12 +375,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         start_time = time.time()
         # run everything in inference mode
         with torch.inference_mode():
+            if command_term is not None:
+                if command_source == "keyboard":
+                    command = keyboard_source.poll().to(device=env.unwrapped.device)
+                else:
+                    command = _scheduled_command(step_count, command_limits, device=env.unwrapped.device)
+                _apply_velocity_command_override(command_term, command)
+
             # agent stepping
             actions = policy(obs)
             # env stepping
             obs, _, dones, _ = env.step(actions)
             # reset recurrent states for episodes that have terminated
             policy_nn.reset(dones)
+            step_count += 1
         if args_cli.video:
             timestep += 1
             # Exit the play loop after recording one video
@@ -198,6 +399,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+
+    if keyboard_source is not None:
+        keyboard_source.close()
 
     # close the simulator
     env.close()

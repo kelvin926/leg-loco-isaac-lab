@@ -50,15 +50,17 @@ def main():
 
     # count of environments
     index = 0
+    keyword = args_cli.keyword.lower() if args_cli.keyword is not None else None
     # acquire all Isaac environments names
     for task_spec in gym.registry.values():
-        if "Isaac" in task_spec.id and (args_cli.keyword is None or args_cli.keyword in task_spec.id):
+        if "Isaac" in task_spec.id and (keyword is None or keyword in task_spec.id.lower()):
             # add details to table
             table.add_row([index + 1, task_spec.id, task_spec.entry_point, task_spec.kwargs["env_cfg_entry_point"]])
             # increment count
             index += 1
 
-    print(table)
+    # Flush explicitly because Kit shutdown can terminate before buffered stdout is written.
+    print(table, flush=True)
 
 
 if __name__ == "__main__":
