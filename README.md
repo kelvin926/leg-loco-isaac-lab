@@ -4,6 +4,8 @@
 
 # Isaac Lab
 
+> Go2W 헤드리스 Docker/RL 가이드 (한국어): [`README_GO2W.md`](README_GO2W.md)
+
 [![IsaacSim](https://img.shields.io/badge/IsaacSim-5.1.0-silver.svg)](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)
 [![Python](https://img.shields.io/badge/python-3.11-blue.svg)](https://docs.python.org/3/whatsnew/3.11.html)
 [![Linux platform](https://img.shields.io/badge/platform-linux--64-orange.svg)](https://releases.ubuntu.com/22.04/)
