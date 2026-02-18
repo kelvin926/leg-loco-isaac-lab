@@ -14,12 +14,12 @@ class UnitreeGo2WFlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     max_iterations = 1500
     save_interval = 50
     experiment_name = "unitree_go2w_flat"
-    # Slightly tighter action clipping helps prevent unstable wheel spikes.
-    clip_actions = 0.8
+    # Fine-tuning phase: keep actions conservative for posture-first control.
+    clip_actions = 0.75
     empirical_normalization = False
     policy = RslRlPpoActorCriticCfg(
-        # Keep exploration moderate; large std destabilizes Go2W wheel-leg coupling.
-        init_noise_std=0.4,
+        # Start from lower exploration in the flat polishing stage.
+        init_noise_std=0.3,
         noise_std_type="log",
         actor_obs_normalization=False,
         critic_obs_normalization=False,
@@ -31,13 +31,13 @@ class UnitreeGo2WFlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=1.0e-4,
+        entropy_coef=5.0e-5,
         num_learning_epochs=4,
         num_mini_batches=4,
-        learning_rate=2.5e-4,
+        learning_rate=1.5e-4,
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,
-        desired_kl=0.004,
+        desired_kl=0.003,
         max_grad_norm=0.75,
     )

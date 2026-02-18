@@ -35,41 +35,46 @@ class UnitreeGo2WFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.commands.base_velocity.debug_vis = False
         self.commands.base_velocity.heading_command = False
         self.commands.base_velocity.rel_heading_envs = 0.0
-        self.commands.base_velocity.rel_standing_envs = 0.02
-        self.commands.base_velocity.resampling_time_range = (5.0, 10.0)
-        self.commands.base_velocity.ranges.lin_vel_x = (-1.0, 1.0)
-        self.commands.base_velocity.ranges.lin_vel_y = (-0.6, 0.6)
-        self.commands.base_velocity.ranges.ang_vel_z = (-1.0, 1.0)
+        self.commands.base_velocity.rel_standing_envs = 0.05
+        self.commands.base_velocity.resampling_time_range = (6.0, 12.0)
+        self.commands.base_velocity.ranges.lin_vel_x = (-0.8, 0.8)
+        self.commands.base_velocity.ranges.lin_vel_y = (-0.4, 0.4)
+        self.commands.base_velocity.ranges.ang_vel_z = (-0.8, 0.8)
 
         # Actions: leg posture (position) + wheel spin (velocity)
         self.actions.joint_pos = mdp.JointPositionActionCfg(
             asset_name="robot",
             joint_names=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
-            scale=0.2,
+            scale=0.12,
             use_default_offset=True,
         )
         self.actions.joint_vel = mdp.JointVelocityActionCfg(
             asset_name="robot",
             joint_names=[".*_foot_joint"],
-            scale=20.0,
+            scale=24.0,
             use_default_offset=False,
         )
 
         # Rewards tuned for stable velocity tracking
         self.rewards.feet_air_time = None
         self.rewards.undesired_contacts.params["sensor_cfg"].body_names = ".*_(hip|thigh|calf)"
-        self.rewards.undesired_contacts.weight = -1.0
-        self.rewards.track_lin_vel_xy_exp.weight = 2.0
-        self.rewards.track_ang_vel_z_exp.weight = 1.0
-        self.rewards.flat_orientation_l2.weight = -2.5
-        self.rewards.lin_vel_z_l2.weight = -2.0
-        self.rewards.ang_vel_xy_l2.weight = -0.1
-        self.rewards.dof_torques_l2.weight = -5.0e-5
-        self.rewards.dof_acc_l2.weight = -1.0e-7
-        self.rewards.action_rate_l2.weight = -0.01
+        self.rewards.undesired_contacts.weight = -1.2
+        self.rewards.track_lin_vel_xy_exp.weight = 2.2
+        self.rewards.track_ang_vel_z_exp.weight = 1.1
+        self.rewards.flat_orientation_l2.weight = -4.5
+        self.rewards.lin_vel_z_l2.weight = -2.5
+        self.rewards.ang_vel_xy_l2.weight = -0.25
+        self.rewards.dof_torques_l2.weight = -8.0e-5
+        self.rewards.dof_acc_l2.weight = -2.0e-7
+        self.rewards.action_rate_l2.weight = -0.02
+        self.rewards.base_height_l2 = RewTerm(
+            func=mdp.base_height_l2,
+            weight=-5.0,
+            params={"target_height": 0.45},
+        )
         self.rewards.leg_joint_deviation = RewTerm(
             func=mdp.joint_deviation_l1,
-            weight=-0.1,
+            weight=-0.22,
             params={
                 "asset_cfg": SceneEntityCfg(
                     "robot",
@@ -79,7 +84,7 @@ class UnitreeGo2WFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.rewards.leg_joint_deviation_stand = RewTerm(
             func=mdp.stand_still_joint_deviation_l1,
-            weight=-0.2,
+            weight=-0.45,
             params={
                 "command_name": "base_velocity",
                 "command_threshold": 0.08,
@@ -89,11 +94,39 @@ class UnitreeGo2WFlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 ),
             },
         )
+        self.rewards.leg_joint_vel_l2 = RewTerm(
+            func=mdp.joint_vel_l2,
+            weight=-0.0025,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    joint_names=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
+                )
+            },
+        )
+        self.rewards.leg_joint_torque_l2 = RewTerm(
+            func=mdp.joint_torques_l2,
+            weight=-1.2e-4,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    joint_names=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
+                )
+            },
+        )
 
         # Keep episode resets strict enough to avoid crawling postures.
         self.terminations.base_contact = DoneTerm(
             func=mdp.illegal_contact,
             params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="base"), "threshold": 1.0},
+        )
+        self.terminations.bad_orientation = DoneTerm(
+            func=mdp.bad_orientation,
+            params={"limit_angle": 0.55},
+        )
+        self.terminations.low_base_height = DoneTerm(
+            func=mdp.root_height_below_minimum,
+            params={"minimum_height": 0.22},
         )
         self.terminations.leg_contact = None
         self.events.add_base_mass = None
