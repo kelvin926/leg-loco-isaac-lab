@@ -81,6 +81,64 @@ parser.add_argument(
     default=0.2,
     help="Per-key increment for wz in keyboard mode.",
 )
+parser.add_argument(
+    "--schedule_profile",
+    type=str,
+    default="wasd_qe",
+    choices=["wasd_qe", "legacy"],
+    help="Schedule profile for --command_source schedule.",
+)
+parser.add_argument(
+    "--schedule_hold_seconds",
+    type=float,
+    default=3.0,
+    help="How long to hold each scheduled command in seconds.",
+)
+parser.add_argument(
+    "--camera_eye",
+    type=float,
+    nargs=3,
+    default=None,
+    help="Set camera eye position for the viewport (x y z).",
+)
+parser.add_argument(
+    "--camera_target",
+    type=float,
+    nargs=3,
+    default=None,
+    help="Set camera target/look-at position for the viewport (x y z).",
+)
+parser.add_argument(
+    "--camera_follow",
+    action="store_true",
+    default=False,
+    help="Enable robot-following camera (updates every simulation step).",
+)
+parser.add_argument(
+    "--camera_follow_env_idx",
+    type=int,
+    default=0,
+    help="Environment index to follow when --camera_follow is enabled.",
+)
+parser.add_argument(
+    "--camera_follow_offset",
+    type=float,
+    nargs=3,
+    default=[-1.2, 0.0, 0.55],
+    help="Camera offset in robot frame (x y z) when --camera_follow is enabled.",
+)
+parser.add_argument(
+    "--camera_follow_target_height",
+    type=float,
+    default=0.25,
+    help="Target height offset above robot base for follow camera.",
+)
+parser.add_argument(
+    "--camera_follow_full_orientation",
+    action="store_true",
+    default=False,
+    help="Rotate follow offset with full base orientation instead of yaw-only.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -125,6 +183,7 @@ from isaaclab.envs import (
 )
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
+from isaaclab.utils.math import quat_apply, quat_apply_yaw
 
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx
 from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
@@ -210,25 +269,49 @@ class _TerminalWsadCommandSource:
         self._enabled = False
 
 
-def _scheduled_command(step: int, limits: _CommandLimits, device: str) -> torch.Tensor:
-    # Eight short phases to exercise vx, vy and wz tracking.
-    phase = (step // 250) % 8
-    if phase == 0:
-        cmd = (0.8 * limits.vx, 0.0, 0.0)
-    elif phase == 1:
-        cmd = (-0.8 * limits.vx, 0.0, 0.0)
-    elif phase == 2:
-        cmd = (0.0, 0.8 * limits.vy, 0.0)
-    elif phase == 3:
-        cmd = (0.0, -0.8 * limits.vy, 0.0)
-    elif phase == 4:
-        cmd = (0.0, 0.0, 0.8 * limits.wz)
-    elif phase == 5:
-        cmd = (0.0, 0.0, -0.8 * limits.wz)
-    elif phase == 6:
-        cmd = (0.6 * limits.vx, 0.4 * limits.vy, 0.5 * limits.wz)
+def _scheduled_command(
+    step: int,
+    limits: _CommandLimits,
+    device: str,
+    phase_steps: int,
+    profile: str,
+) -> torch.Tensor:
+    # Default schedule: W/A/S/D/Q/E sequence for deterministic command-tracking checks.
+    safe_phase_steps = max(1, phase_steps)
+    if profile == "wasd_qe":
+        phase = (step // safe_phase_steps) % 6
+        if phase == 0:  # W
+            cmd = (0.8 * limits.vx, 0.0, 0.0)
+        elif phase == 1:  # A
+            cmd = (0.0, 0.8 * limits.vy, 0.0)
+        elif phase == 2:  # S
+            cmd = (-0.8 * limits.vx, 0.0, 0.0)
+        elif phase == 3:  # D
+            cmd = (0.0, -0.8 * limits.vy, 0.0)
+        elif phase == 4:  # Q
+            cmd = (0.0, 0.0, 0.8 * limits.wz)
+        else:  # E
+            cmd = (0.0, 0.0, -0.8 * limits.wz)
+    elif profile == "legacy":
+        phase = (step // safe_phase_steps) % 8
+        if phase == 0:
+            cmd = (0.8 * limits.vx, 0.0, 0.0)
+        elif phase == 1:
+            cmd = (-0.8 * limits.vx, 0.0, 0.0)
+        elif phase == 2:
+            cmd = (0.0, 0.8 * limits.vy, 0.0)
+        elif phase == 3:
+            cmd = (0.0, -0.8 * limits.vy, 0.0)
+        elif phase == 4:
+            cmd = (0.0, 0.0, 0.8 * limits.wz)
+        elif phase == 5:
+            cmd = (0.0, 0.0, -0.8 * limits.wz)
+        elif phase == 6:
+            cmd = (0.6 * limits.vx, 0.4 * limits.vy, 0.5 * limits.wz)
+        else:
+            cmd = (0.0, 0.0, 0.0)
     else:
-        cmd = (0.0, 0.0, 0.0)
+        raise ValueError(f"Unknown schedule profile: {profile}")
     return torch.tensor(cmd, dtype=torch.float32, device=device)
 
 
@@ -247,6 +330,27 @@ def _apply_velocity_command_override(command_term, command: torch.Tensor):
         command_term.is_heading_env[:] = False
     if hasattr(command_term, "time_left"):
         command_term.time_left[:] = 1.0e9
+
+
+def _update_follow_camera(
+    env,
+    robot,
+    env_index: int,
+    offset_local: torch.Tensor,
+    target_height: float,
+    full_orientation: bool,
+):
+    root_pos = robot.data.root_pos_w[env_index]
+    root_quat = robot.data.root_quat_w[env_index]
+    quat_batch = root_quat.unsqueeze(0)
+    offset_batch = offset_local.unsqueeze(0)
+    if full_orientation:
+        world_offset = quat_apply(quat_batch, offset_batch)[0]
+    else:
+        world_offset = quat_apply_yaw(quat_batch, offset_batch)[0]
+    eye = (root_pos + world_offset).detach().cpu().tolist()
+    target = (root_pos + torch.tensor([0.0, 0.0, target_height], device=root_pos.device)).detach().cpu().tolist()
+    env.sim.set_camera_view(eye=eye, target=target)
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -302,6 +406,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print("[INFO] Recording videos during training.")
         print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
+
+    # Set a custom camera view if requested.
+    if args_cli.camera_eye is not None and args_cli.camera_target is not None:
+        env.unwrapped.sim.set_camera_view(eye=args_cli.camera_eye, target=args_cli.camera_target)
+
+    # Optional camera-follow mode.
+    camera_follow_robot = None
+    camera_follow_offset = None
+    camera_follow_env_index = args_cli.camera_follow_env_idx
+    if args_cli.camera_follow:
+        if "robot" not in env.unwrapped.scene.keys():
+            raise ValueError("Follow camera requires a robot asset named 'robot' in the scene.")
+        if camera_follow_env_index < 0 or camera_follow_env_index >= env.unwrapped.scene.num_envs:
+            raise ValueError(
+                f"Follow camera env index out of range: {camera_follow_env_index}"
+                f" (num_envs={env.unwrapped.scene.num_envs})"
+            )
+        camera_follow_robot = env.unwrapped.scene["robot"]
+        camera_follow_offset = torch.tensor(args_cli.camera_follow_offset, dtype=torch.float32, device=env.unwrapped.device)
+        print(
+            "[INFO] Follow camera enabled:"
+            f" env={camera_follow_env_index}, offset={args_cli.camera_follow_offset},"
+            f" target_height={args_cli.camera_follow_target_height:.3f},"
+            f" full_orientation={args_cli.camera_follow_full_orientation}"
+        )
 
     # Optional external command control for command-conditioned locomotion tasks.
     command_source = args_cli.command_source
@@ -365,6 +494,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
 
     dt = env.unwrapped.step_dt
+    schedule_phase_steps = max(1, int(round(args_cli.schedule_hold_seconds / dt)))
+    if command_source == "schedule":
+        print(
+            "[INFO] Command schedule mode:"
+            f" profile={args_cli.schedule_profile}, hold={args_cli.schedule_hold_seconds:.2f}s"
+            f" ({schedule_phase_steps} steps at dt={dt:.4f}s)"
+        )
     step_count = 0
 
     # reset environment
@@ -379,13 +515,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 if command_source == "keyboard":
                     command = keyboard_source.poll().to(device=env.unwrapped.device)
                 else:
-                    command = _scheduled_command(step_count, command_limits, device=env.unwrapped.device)
+                    command = _scheduled_command(
+                        step_count,
+                        command_limits,
+                        device=env.unwrapped.device,
+                        phase_steps=schedule_phase_steps,
+                        profile=args_cli.schedule_profile,
+                    )
                 _apply_velocity_command_override(command_term, command)
 
             # agent stepping
             actions = policy(obs)
             # env stepping
             obs, _, dones, _ = env.step(actions)
+            if camera_follow_robot is not None:
+                _update_follow_camera(
+                    env.unwrapped,
+                    camera_follow_robot,
+                    env_index=camera_follow_env_index,
+                    offset_local=camera_follow_offset,
+                    target_height=args_cli.camera_follow_target_height,
+                    full_orientation=args_cli.camera_follow_full_orientation,
+                )
             # reset recurrent states for episodes that have terminated
             policy_nn.reset(dones)
             step_count += 1
